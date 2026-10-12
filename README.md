@@ -40,22 +40,35 @@ chmod +x campus-sso-login.sh
 
 ## 注销做了什么
 
-按这个顺序依次尝试并逐条报告：
+按**浏览器真实发出的请求**（用 DevTools 导出 HAR 抓到的）依次两步：
 
-1. `GET <门户>:801/eportal/portal/logout` —— **Portal 协议注销**
-2. `GET <门户>/drcom/logout` —— web 模式注销（兜底）
-3. `GET <门户>:801/eportal/portal/cas/logout` + 跟随返回的 `switch_uri` —— 注销 CAS 单点登录
+**1. 解绑终端 MAC —— 这一步才是真正断网的**
 
-第 1、2 步的区别很关键：`/drcom/logout` **只认 web 模式建立的会话**，走「统一身份认证」
-登录建立的是 Portal 协议会话，所以它会回 `Logout Error(no webmode)`。正确的接口是
-`/eportal/portal/logout`。
+```
+GET https://<门户>:802/eportal/portal/mac/unbind
+      ?callback=dr1002&user_account=<学号>&wlan_user_mac=000000000000
+      &wlan_user_ip=<本机IP>&wlan_user_ipv6=::&unbind_type=1
+      &jsVersion=4.2.2&program_index=..&page_index=..&v=..&lang=..
+    -> {"result":1,"msg":"Unbind Terminal Mac successful!"}
+```
 
-第 3 步是韩师专门定制的（门户 JS 里就写着「韩山师范学院 同步注销单点登录」），
-不做的话 CAS 那边登录态还在，下次可能免密直接又登上。
+注意这里**不是** `/drcom/logout`。门户 JS 在 `unBindMac == 1` 时走的是
+`user.unbind_mac()` 分支，而 `/drcom/logout` 对走统一身份认证建立的会话会回
+`Logout Error(no webmode)`。照抄前者才对。
 
-> 已知问题：在 macOS 上实测，第 1 步返回 `Portal协议注销成功！`，但会话并不会真的消失
-> （`chkstatus` 的 `stime` 不变、`result` 仍为 1）。怀疑与网卡 MAC 有关 —— macOS 的
-> 「私有 Wi-Fi 地址」会让 MAC 随机化，而会话绑定的是真实 MAC。待验证。
+**2. 注销 CAS 单点登录**
+
+```
+GET https://<门户>:802/eportal/portal/cas/logout?...
+    -> {"result":1,"switch_uri":"https://hscas.hstc.edu.cn/cas/logout?..."}
+```
+
+拿到 `switch_uri` 后还要跟过去，CAS 那边的登录态才会清掉。
+
+脚本会先调 `chkstatus` 取出自己的 `uid`（账号）和 `ss5`（门户眼中的本机 IP），
+再用它们组装上面两条请求。请求都带 `Referer: https://<门户>/`。
+
+> 注销后你会掉线。想省事可以用 `--logout --relogin`，脚本会注销后自动登回来。
 
 ## 账号密码
 

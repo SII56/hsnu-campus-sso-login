@@ -42,7 +42,10 @@
 # Usage:
 #   ./campus-sso-login.sh            login if not already online
 #   ./campus-sso-login.sh --check    only report the online state
-#   ./campus-sso-login.sh --logout   log out (portal, then CAS single sign-on)
+#   ./campus-sso-login.sh --logout   log out (unbind MAC, then CAS sign-off)
+#   ./campus-sso-login.sh --logout --relogin
+#                                    ... and log straight back in afterwards, so
+#                                    you are never left stranded offline
 #   ./campus-sso-login.sh --force    ignore the online state
 #   ./campus-sso-login.sh --dry-run  walk the chain, never submit a password
 #
@@ -66,6 +69,7 @@ FORCE_REDIRECT="${CAMPUS_REDIRECT:-}"
 PROBE="${CAMPUS_PROBE:-http://connect.rom.miui.com/generate_204}"
 PORTAL="${CAMPUS_PORTAL:-https://rz.hstc.edu.cn}"
 EP_HTTP_PORT="${CAMPUS_EP_HTTP_PORT:-801}"
+EP_HTTPS_PORT="${CAMPUS_EP_HTTPS_PORT:-802}"
 CAS_BASE="${CAMPUS_CAS:-https://hscas.hstc.edu.cn/cas}"
 UA="${CAMPUS_UA:-Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36}"
 WORK="${CAMPUS_WORK:-/tmp/campus-sso}"
@@ -73,10 +77,11 @@ LOG="${CAMPUS_LOG:-/tmp/campus-sso-login.log}"
 PAGE_PROGRAM=""      # filled in from loadConfig on demand
 PAGE_INDEX=""
 
-CHECK=0; FORCE=0; DRY=0; LOGOUT=0
+CHECK=0; FORCE=0; DRY=0; LOGOUT=0; RELOGIN=0
 for arg in "$@"; do case "$arg" in
   --check)   CHECK=1 ;;
   --logout)  LOGOUT=1 ;;
+  --relogin) RELOGIN=1 ;;
   --force)   FORCE=1 ;;
   --dry-run) DRY=1; FORCE=1 ;;
   -h|--help) sed -n '2,55p' "$0"; exit 0 ;;
@@ -124,53 +129,56 @@ page_indices(){
 # ---------------------------------------------------------------- logout
 logout_now(){
   local host="${PORTAL#*//}"; host="${host%%/*}"
-  local ip; ip="$(local_ip)"
-  local rnd; rnd=$RANDOM
-  page_indices "$ip"
+  local base="https://$host:$EP_HTTPS_PORT/eportal/portal"
+  local ref="https://$host/"
+  local rnd; rnd=$((RANDOM % 9000 + 1000))
+  page_indices "$(local_ip)"
 
-  # A session created through the CAS flow is a *portal protocol* session, so the
-  # web-mode endpoint /drcom/logout refuses it with "Logout Error(no webmode)".
-  # /eportal/portal/logout is the endpoint that matches this kind of session.
-  log "logging out: http://$host:$EP_HTTP_PORT/eportal/portal/logout"
+  # The portal tells us who we are: uid is the account, ss5 is the client IP as
+  # the portal itself sees it. Both are needed by the unbind call below.
+  local st uid cip
+  st="$(curl -sS -m 10 -A "$UA" "$PORTAL/drcom/chkstatus?callback=cb&jsVersion=4.2.2" 2>/dev/null)"
+  uid="$(printf '%s' "$st" | LC_ALL=C sed -n 's/.*"uid":"\([^"]*\)".*/\1/p')"
+  cip="$(printf '%s' "$st" | LC_ALL=C sed -n 's/.*"ss5":"\([^"]*\)".*/\1/p')"
+  [ -n "$cip" ] || cip="$(local_ip)"
+  log "portal sees us as uid=${uid:-?} ip=${cip:-?}"
+
+  # 1) Unbind the terminal MAC. THIS is the call that actually drops the session.
+  #    (The web-mode /drcom/logout endpoint is never used by this deployment:
+  #     with unBindMac=1 the page calls user.unbind_mac() instead, which posts
+  #     unbind_type=1 here.)
   local r1
-  r1="$(curl -sS -m 12 -A "$UA" -G "http://$host:$EP_HTTP_PORT/eportal/portal/logout" \
+  r1="$(curl -sS -m 12 -A "$UA" -H "Referer: $ref" -G "$base/mac/unbind" \
         --data-urlencode "callback=dr$rnd" \
+        --data-urlencode "user_account=${uid:-}" \
+        --data-urlencode "wlan_user_mac=000000000000" \
+        --data-urlencode "wlan_user_ip=$cip" \
+        --data-urlencode "wlan_user_ipv6=::" \
+        --data-urlencode "unbind_type=1" \
+        --data-urlencode "jsVersion=4.2.2" \
         --data-urlencode "program_index=$PAGE_PROGRAM" \
         --data-urlencode "page_index=$PAGE_INDEX" \
         --data-urlencode "v=$((RANDOM % 10000 + 500))" \
-        --data-urlencode "lang=zh-cn" \
-        --data-urlencode "jsVersion=4.1" 2>/dev/null)"
-  log "portal/logout -> $r1"
+        --data-urlencode "lang=zh-cn" 2>/dev/null)"
+  log "mac/unbind   -> $r1"
 
   sleep 2
   if ! online; then log "logged out"; return 0; fi
 
-  # Fallback: the web-mode endpoint, then the CAS single sign-on sign-off.
-  log "still online, trying the web-mode endpoint $PORTAL/drcom/logout"
+  # 2) CAS single sign-on sign-off, then follow the returned switch_uri.
   local r2
-  r2="$(curl -sS -m 12 -A "$UA" -G "$PORTAL/drcom/logout" \
-        --data-urlencode "callback=dr$rnd" \
+  r2="$(curl -sS -m 12 -A "$UA" -H "Referer: $ref" -G "$base/cas/logout" \
+        --data-urlencode "callback=dr$((rnd + 1))" \
+        --data-urlencode "wlan_user_ip=$cip" \
+        --data-urlencode "jsVersion=4.2.2" \
         --data-urlencode "program_index=$PAGE_PROGRAM" \
         --data-urlencode "page_index=$PAGE_INDEX" \
         --data-urlencode "v=$((RANDOM % 10000 + 500))" \
-        --data-urlencode "lang=zh-cn" \
-        --data-urlencode "jsVersion=4.1" 2>/dev/null)"
-  log "drcom/logout  -> $r2"
+        --data-urlencode "lang=zh-cn" 2>/dev/null)"
+  log "cas/logout   -> $r2"
 
-  local r3
-  r3="$(curl -sS -m 12 -A "$UA" -G "http://$host:$EP_HTTP_PORT/eportal/portal/cas/logout" \
-        --data-urlencode "callback=dr$rnd" \
-        --data-urlencode "program_index=$PAGE_PROGRAM" \
-        --data-urlencode "page_index=$PAGE_INDEX" \
-        --data-urlencode "v=$((RANDOM % 10000 + 500))" \
-        --data-urlencode "lang=zh-cn" \
-        --data-urlencode "wlan_user_ip=${ip:-}" \
-        --data-urlencode "jsVersion=4.2.1" 2>/dev/null)"
-  log "cas/logout    -> $r3"
-
-  # the portal answers with the CAS logout URL that the browser would visit next
   local sw
-  sw="$(printf '%s' "$r3" | sed -n 's/.*"switch_uri":"\([^"]*\)".*/\1/p' | sed 's#\\/#/#g')"
+  sw="$(printf '%s' "$r2" | LC_ALL=C sed -n 's/.*"switch_uri":"\([^"]*\)".*/\1/p' | sed 's#\\/#/#g')"
   if [ -n "$sw" ]; then
     log "cas logout redirect -> $sw"
     curl -sS -m 12 -A "$UA" -o /dev/null "$sw" 2>/dev/null
@@ -178,15 +186,21 @@ logout_now(){
 
   sleep 3
   if online; then
-    log "still online after logout. The portal reported success, so the session is"
-    log "probably bound to a different MAC - compare chkstatus 'ss1' with this host's MAC"
+    log "still online after logout"
     return 2
   fi
   log "logged out"
   return 0
 }
 
-if [ "$LOGOUT" = 1 ]; then logout_now; exit $?; fi
+if [ "$LOGOUT" = 1 ]; then
+  logout_now; rc=$?
+  if [ "$RELOGIN" = 1 ]; then
+    log "logging back in (--relogin)"
+    "$SELF_DIR/campus-sso-login.sh" --force
+  fi
+  exit $rc
+fi
 
 if [ "$FORCE" = 0 ] && online; then log "already online, nothing to do"; exit 0; fi
 if [ "$CHECK" = 1 ]; then log "not online"; exit 1; fi
