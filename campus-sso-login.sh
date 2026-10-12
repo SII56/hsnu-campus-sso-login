@@ -70,6 +70,8 @@ CAS_BASE="${CAMPUS_CAS:-https://hscas.hstc.edu.cn/cas}"
 UA="${CAMPUS_UA:-Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36}"
 WORK="${CAMPUS_WORK:-/tmp/campus-sso}"
 LOG="${CAMPUS_LOG:-/tmp/campus-sso-login.log}"
+PAGE_PROGRAM=""      # filled in from loadConfig on demand
+PAGE_INDEX=""
 
 CHECK=0; FORCE=0; DRY=0; LOGOUT=0
 for arg in "$@"; do case "$arg" in
@@ -104,28 +106,80 @@ local_ip(){
   fi
 }
 
+# Every portal jsonp call carries program_index / page_index / v / lang on top of
+# callback+jsVersion (see util._jsonp). The two indices come from loadConfig; note
+# that wlan_ac_ip and wlan_user_ipv6 must be present even when empty.
+page_indices(){
+  [ -n "$PAGE_PROGRAM" ] && [ -n "$PAGE_INDEX" ] && return 0
+  local ip="${1:-$(local_ip)}"
+  local b64; b64="$(printf '%s' "$ip" | base64 | tr -d '\n')"
+  local host="${PORTAL#*//}"; host="${host%%/*}"
+  local r
+  r="$(curl -sS -m 12 -A "$UA" \
+       "http://$host:$EP_HTTP_PORT/eportal/portal/page/loadConfig?callback=cb&program_index=&wlan_user_ip=$b64&wlan_ac_ip=&wlan_user_ipv6=&jsVersion=4.1" 2>/dev/null)"
+  PAGE_PROGRAM="$(printf '%s' "$r" | sed -n 's/.*"program_index":"\([^"]*\)".*/\1/p')"
+  PAGE_INDEX="$(printf '%s' "$r" | sed -n 's/.*"page_index":"\([^"]*\)".*/\1/p')"
+}
+
 # ---------------------------------------------------------------- logout
 logout_now(){
   local host="${PORTAL#*//}"; host="${host%%/*}"
   local ip; ip="$(local_ip)"
-  log "logging out of the portal: $PORTAL/drcom/logout"
+  local rnd; rnd=$RANDOM
+  page_indices "$ip"
 
+  # A session created through the CAS flow is a *portal protocol* session, so the
+  # web-mode endpoint /drcom/logout refuses it with "Logout Error(no webmode)".
+  # /eportal/portal/logout is the endpoint that matches this kind of session.
+  log "logging out: http://$host:$EP_HTTP_PORT/eportal/portal/logout"
   local r1
-  r1="$(curl -sS -m 12 -A "$UA" -G "$PORTAL/drcom/logout" \
-        --data-urlencode "callback=dr$RANDOM$RANDOM" \
+  r1="$(curl -sS -m 12 -A "$UA" -G "http://$host:$EP_HTTP_PORT/eportal/portal/logout" \
+        --data-urlencode "callback=dr$rnd" \
+        --data-urlencode "program_index=$PAGE_PROGRAM" \
+        --data-urlencode "page_index=$PAGE_INDEX" \
+        --data-urlencode "v=$((RANDOM % 10000 + 500))" \
+        --data-urlencode "lang=zh-cn" \
         --data-urlencode "jsVersion=4.1" 2>/dev/null)"
-  log "drcom/logout -> ${r1:0:160}"
-
-  local r2
-  r2="$(curl -sS -m 12 -A "$UA" -G "http://$host:$EP_HTTP_PORT/eportal/portal/cas/logout" \
-        --data-urlencode "callback=dr$RANDOM$RANDOM" \
-        --data-urlencode "wlan_user_ip=${ip:-}" \
-        --data-urlencode "jsVersion=4.2.1" 2>/dev/null)"
-  log "cas/logout   -> ${r2:0:200}"
+  log "portal/logout -> $r1"
 
   sleep 2
+  if ! online; then log "logged out"; return 0; fi
+
+  # Fallback: the web-mode endpoint, then the CAS single sign-on sign-off.
+  log "still online, trying the web-mode endpoint $PORTAL/drcom/logout"
+  local r2
+  r2="$(curl -sS -m 12 -A "$UA" -G "$PORTAL/drcom/logout" \
+        --data-urlencode "callback=dr$rnd" \
+        --data-urlencode "program_index=$PAGE_PROGRAM" \
+        --data-urlencode "page_index=$PAGE_INDEX" \
+        --data-urlencode "v=$((RANDOM % 10000 + 500))" \
+        --data-urlencode "lang=zh-cn" \
+        --data-urlencode "jsVersion=4.1" 2>/dev/null)"
+  log "drcom/logout  -> $r2"
+
+  local r3
+  r3="$(curl -sS -m 12 -A "$UA" -G "http://$host:$EP_HTTP_PORT/eportal/portal/cas/logout" \
+        --data-urlencode "callback=dr$rnd" \
+        --data-urlencode "program_index=$PAGE_PROGRAM" \
+        --data-urlencode "page_index=$PAGE_INDEX" \
+        --data-urlencode "v=$((RANDOM % 10000 + 500))" \
+        --data-urlencode "lang=zh-cn" \
+        --data-urlencode "wlan_user_ip=${ip:-}" \
+        --data-urlencode "jsVersion=4.2.1" 2>/dev/null)"
+  log "cas/logout    -> $r3"
+
+  # the portal answers with the CAS logout URL that the browser would visit next
+  local sw
+  sw="$(printf '%s' "$r3" | sed -n 's/.*"switch_uri":"\([^"]*\)".*/\1/p' | sed 's#\\/#/#g')"
+  if [ -n "$sw" ]; then
+    log "cas logout redirect -> $sw"
+    curl -sS -m 12 -A "$UA" -o /dev/null "$sw" 2>/dev/null
+  fi
+
+  sleep 3
   if online; then
-    log "still online after logout - either the portal needs a moment, or the session belongs to a router/NAT in front of this machine"
+    log "still online after logout. The portal reported success, so the session is"
+    log "probably bound to a different MAC - compare chkstatus 'ss1' with this host's MAC"
     return 2
   fi
   log "logged out"
@@ -166,8 +220,13 @@ log "ip=$WIP mac=$UMAC ac=$ACIP/$ACNAME portal=$SCHEME://$PHOST"
 EP="http://$PHOST:$EP_HTTP_PORT/eportal/portal"
 
 # ---------------------------------------------------------------- 2. cas/create
+page_indices "$WIP"
 CREATE="$(curl -sS -m 12 -A "$UA" -G "$EP/cas/create" \
   --data-urlencode "callback=cb" \
+  --data-urlencode "program_index=$PAGE_PROGRAM" \
+  --data-urlencode "page_index=$PAGE_INDEX" \
+  --data-urlencode "v=$((RANDOM % 10000 + 500))" \
+  --data-urlencode "lang=zh-cn" \
   --data-urlencode "login_method=1" \
   --data-urlencode "wlan_user_ip=$WIP" \
   --data-urlencode "wlan_user_mac=$UMAC" \

@@ -40,13 +40,22 @@ chmod +x campus-sso-login.sh
 
 ## 注销做了什么
 
-按门户自己代码里的顺序，两步：
+按这个顺序依次尝试并逐条报告：
 
-1. `GET <门户>/drcom/logout` —— 断掉上网会话
-2. `GET <门户>:801/eportal/portal/cas/logout` —— 同步注销 CAS 单点登录
+1. `GET <门户>:801/eportal/portal/logout` —— **Portal 协议注销**
+2. `GET <门户>/drcom/logout` —— web 模式注销（兜底）
+3. `GET <门户>:801/eportal/portal/cas/logout` + 跟随返回的 `switch_uri` —— 注销 CAS 单点登录
 
-第 2 步是韩师专门定制的（门户 JS 里就写着「韩山师范学院 同步注销单点登录」），
-如果不做，CAS 那边的登录态还在，下次可能免密直接又登上。
+第 1、2 步的区别很关键：`/drcom/logout` **只认 web 模式建立的会话**，走「统一身份认证」
+登录建立的是 Portal 协议会话，所以它会回 `Logout Error(no webmode)`。正确的接口是
+`/eportal/portal/logout`。
+
+第 3 步是韩师专门定制的（门户 JS 里就写着「韩山师范学院 同步注销单点登录」），
+不做的话 CAS 那边登录态还在，下次可能免密直接又登上。
+
+> 已知问题：在 macOS 上实测，第 1 步返回 `Portal协议注销成功！`，但会话并不会真的消失
+> （`chkstatus` 的 `stime` 不变、`result` 仍为 1）。怀疑与网卡 MAC 有关 —— macOS 的
+> 「私有 Wi-Fi 地址」会让 MAC 随机化，而会话绑定的是真实 MAC。待验证。
 
 ## 账号密码
 
