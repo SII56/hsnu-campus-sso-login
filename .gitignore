@@ -1,0 +1,9 @@
+# Never commit credentials or logs
+campus.conf
+*.log
+
+# Local scratch
+campus-net/
+*.hdr
+*.body
+*.pem
