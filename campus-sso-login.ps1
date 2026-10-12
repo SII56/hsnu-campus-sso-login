@@ -22,7 +22,8 @@ param(
     [string]$Redirect = $env:CAMPUS_REDIRECT,
     [switch]$Force,
     [switch]$DryRun,
-    [switch]$Check
+    [switch]$Check,
+    [switch]$Logout
 )
 
 $ErrorActionPreference = 'Stop'
@@ -33,10 +34,12 @@ trap {
     Write-Host ''
     Write-Host ("UNHANDLED ERROR at line {0}: {1}" -f $_.InvocationInfo.ScriptLineNumber, $_.Exception.Message) -ForegroundColor Red
     if ($_.InvocationInfo.Line) { Write-Host ("  >> " + $_.InvocationInfo.Line.Trim()) -ForegroundColor DarkGray }
+    Remove-Item $Jar -ErrorAction SilentlyContinue
     exit 1
 }
 
 $Probe    = 'http://connect.rom.miui.com/generate_204'
+$Portal   = 'https://rz.hstc.edu.cn'
 $CasBase  = 'https://hscas.hstc.edu.cn/cas'
 $EpPort   = 801
 $UA       = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -53,7 +56,8 @@ if (Test-Path $ConfFile) {
 }
 
 function Say([string]$m) { Write-Host ("{0} {1}" -f (Get-Date -Format 'HH:mm:ss'), $m) }
-function Die([string]$m) { Write-Host ("ERROR: {0}" -f $m) -ForegroundColor Red; exit 1 }
+function Bye([int]$Code) { Remove-Item $Jar -ErrorAction SilentlyContinue; exit $Code }
+function Die([string]$m) { Write-Host ("ERROR: {0}" -f $m) -ForegroundColor Red; Bye 1 }
 
 if (-not (Test-Path $WorkDir)) { New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null }
 if (-not (Get-Command curl.exe -ErrorAction SilentlyContinue)) {
@@ -100,9 +104,44 @@ function Test-Online {
     return ((Status) -eq 204)
 }
 
+# ---------------------------------------------------------------- logout
+# Mirrors logout.default_logout() -> portal_logout() -> custom.identity_logout():
+# drop the network session first, then the CAS single sign-on.
+function Do-Logout {
+    $hostOnly = ([regex]::Match($Portal, '^https?://([^/]+)')).Groups[1].Value -replace ':\d+$', ''
+    Say "logging out of the portal: $Portal/drcom/logout"
+    RunCurl -Extra @('-G', "$Portal/drcom/logout",
+        '--data-urlencode', "callback=dr$((Get-Random))",
+        '--data-urlencode', 'jsVersion=4.1') -Label 'drcom/logout'
+    $r1 = BodyText; if ($r1.Length -gt 160) { $r1 = $r1.Substring(0, 160) }
+    Say "drcom/logout -> $r1"
+
+    $lip = ''
+    try {
+        $lip = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
+                Where-Object { $_.IPAddress -notlike '127.*' } |
+                Select-Object -First 1).IPAddress
+    } catch { }
+    RunCurl -Extra @('-G', "http://${hostOnly}:$EpPort/eportal/portal/cas/logout",
+        '--data-urlencode', "callback=dr$((Get-Random))",
+        '--data-urlencode', "wlan_user_ip=$lip",
+        '--data-urlencode', 'jsVersion=4.2.1') -Label 'cas/logout'
+    $r2 = BodyText; if ($r2.Length -gt 200) { $r2 = $r2.Substring(0, 200) }
+    Say "cas/logout   -> $r2"
+
+    Start-Sleep -Seconds 2
+    if (Test-Online) {
+        Say 'still online after logout - either the portal needs a moment, or the session belongs to a router/NAT in front of this machine'
+        Bye 2
+    }
+    Say 'logged out'
+    Bye 0
+}
+
 # ---------------------------------------------------------------- entry
-if (-not $Force -and (Test-Online)) { Say 'Already online, nothing to do'; exit 0 }
-if ($Check) { Say 'Not online'; exit 1 }
+if ($Logout) { Do-Logout }
+if (-not $Force -and (Test-Online)) { Say 'Already online, nothing to do'; Bye 0 }
+if ($Check) { Say 'Not online'; Bye 1 }
 if ($DryRun) { $Force = $true }
 
 $Interactive = -not [Console]::IsInputRedirected
@@ -125,7 +164,7 @@ if ($Redirect) {
 else {
     RunCurl -Extra @($Probe) -Label 'probe'
     $pc = Status
-    if ($pc -eq 204) { Say 'Already online, nothing to do'; exit 0 }
+    if ($pc -eq 204) { Say 'Already online, nothing to do'; Bye 0 }
     $redir = HdrVal 'Location'
     if (-not $redir) { $redir = ([regex]::Match((BodyText), "https?://[^'`"]+")).Value }
     if (-not $redir) {
@@ -219,7 +258,7 @@ if (-not $casPage) {
 if ($ticketSeen) {
     Say 'CAS issued a ticket without prompting for credentials'
     Start-Sleep -Seconds 2
-    if (Test-Online) { Say 'Login OK, network is up'; exit 0 }
+    if (Test-Online) { Say 'Login OK, network is up'; Bye 0 }
     Say 'Ticket was seen but the probe is still not 204; falling back to the login form'
 }
 
@@ -279,7 +318,7 @@ Say ("Password RSA-encrypted ({0} chars base64)" -f $encB64.Length)
 if ($DryRun) {
     Say 'dry-run done: whole chain parsed OK, password NOT submitted'
     Say "Would submit: username=$User password=__RSA__<hidden> execution=$($exec.Substring(0,20))... _eventId=submit"
-    exit 0
+    Bye 0
 }
 
 # ---------------------------------------------------------------- 5. submit to CAS
@@ -329,6 +368,6 @@ if ($final) {
 
 # ---------------------------------------------------------------- 6. verify
 Start-Sleep -Seconds 2
-if (Test-Online) { Say 'Login OK, network is up'; exit 0 }
+if (Test-Online) { Say 'Login OK, network is up'; Bye 0 }
 Say "Still offline. Dump dir: $WorkDir"
-exit 2
+Bye 2

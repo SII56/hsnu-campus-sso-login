@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 #
-# campus-sso-login.sh - headless campus-network login for Dr.COM portals that
-# front-end the school CAS single sign-on ("unified identity").
+# campus-sso-login.sh - headless campus-network login for the HSTC Dr.COM portal
+# that fronts the school CAS single sign-on ("unified identity").
 #
-# Reference implementation: Hanshan Normal University (hstc)
 #   portal : http://rz.hstc.edu.cn/    (same host as http://192.168.2.34/)
 #   CAS    : https://hscas.hstc.edu.cn/cas/
 #
@@ -31,6 +30,11 @@
 #   4) A successful POST redirects to  service?ticket=ST-...  and the portal
 #      then completes the network authentication.
 #
+# Logging out mirrors logout.default_logout() -> portal_logout() ->
+# custom.identity_logout():
+#      GET <portal>/drcom/logout?callback=..&jsVersion=4.1
+#      GET <portal>:801/eportal/portal/cas/logout?wlan_user_ip=..
+#
 # If CAS already trusts this client (IP-level SSO, or the authorisation link it
 # just registered) it returns a ticket straight away, with no login form at all.
 # That path is handled as well, and needs no credentials.
@@ -38,14 +42,18 @@
 # Usage:
 #   ./campus-sso-login.sh            login if not already online
 #   ./campus-sso-login.sh --check    only report the online state
+#   ./campus-sso-login.sh --logout   log out (portal, then CAS single sign-on)
 #   ./campus-sso-login.sh --force    ignore the online state
 #   ./campus-sso-login.sh --dry-run  walk the chain, never submit a password
 #
 # Configuration: campus.conf next to this script, or environment variables
 #   CAMPUS_USER / CAMPUS_PASS. Credentials are only requested when the CAS login
 #   form is actually needed (prompted on a TTY, password is not echoed).
+#   Nothing is written to disk: the password only ever lives in this process,
+#   and the cookie jar is deleted on exit.
 #
 set -u
+umask 077                      # cookie jar and dumps stay private to this user
 
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONF="${CAMPUS_CONF:-$SELF_DIR/campus.conf}"
@@ -56,18 +64,20 @@ USERNAME="${CAMPUS_USER:-}"
 PASSWORD="${CAMPUS_PASS:-}"
 FORCE_REDIRECT="${CAMPUS_REDIRECT:-}"
 PROBE="${CAMPUS_PROBE:-http://connect.rom.miui.com/generate_204}"
+PORTAL="${CAMPUS_PORTAL:-https://rz.hstc.edu.cn}"
 EP_HTTP_PORT="${CAMPUS_EP_HTTP_PORT:-801}"
 CAS_BASE="${CAMPUS_CAS:-https://hscas.hstc.edu.cn/cas}"
 UA="${CAMPUS_UA:-Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36}"
 WORK="${CAMPUS_WORK:-/tmp/campus-sso}"
 LOG="${CAMPUS_LOG:-/tmp/campus-sso-login.log}"
 
-CHECK=0; FORCE=0; DRY=0
+CHECK=0; FORCE=0; DRY=0; LOGOUT=0
 for arg in "$@"; do case "$arg" in
   --check)   CHECK=1 ;;
+  --logout)  LOGOUT=1 ;;
   --force)   FORCE=1 ;;
   --dry-run) DRY=1; FORCE=1 ;;
-  -h|--help) sed -n '2,50p' "$0"; exit 0 ;;
+  -h|--help) sed -n '2,55p' "$0"; exit 0 ;;
   *) echo "unknown option: $arg" >&2; exit 2 ;;
 esac; done
 
@@ -78,10 +88,51 @@ command -v curl    >/dev/null 2>&1 || die "curl not found"
 command -v openssl >/dev/null 2>&1 || die "openssl not found"
 command -v base64  >/dev/null 2>&1 || die "base64 not found"
 
-mkdir -p "$WORK"
+mkdir -p "$WORK"; chmod 700 "$WORK" 2>/dev/null
 JAR="$WORK/cookies.txt"; rm -f "$JAR"
+# The jar can hold a CAS session cookie, which is a reusable credential.
+trap 'rm -f "$JAR" 2>/dev/null' EXIT
 
 online(){ [ "$(curl -s -o /dev/null -w '%{http_code}' -m 8 -A "$UA" "$PROBE" 2>/dev/null)" = "204" ]; }
+
+local_ip(){
+  if command -v ip >/dev/null 2>&1; then
+    ip route get 1.1.1.1 2>/dev/null | LC_ALL=C grep -oE 'src [0-9.]+' | awk '{print $2}'
+  else
+    ipconfig getifaddr en0 2>/dev/null \
+      || ifconfig 2>/dev/null | awk '/inet /{print $2}' | LC_ALL=C grep -v '^127\.' | head -1
+  fi
+}
+
+# ---------------------------------------------------------------- logout
+logout_now(){
+  local host="${PORTAL#*//}"; host="${host%%/*}"
+  local ip; ip="$(local_ip)"
+  log "logging out of the portal: $PORTAL/drcom/logout"
+
+  local r1
+  r1="$(curl -sS -m 12 -A "$UA" -G "$PORTAL/drcom/logout" \
+        --data-urlencode "callback=dr$RANDOM$RANDOM" \
+        --data-urlencode "jsVersion=4.1" 2>/dev/null)"
+  log "drcom/logout -> ${r1:0:160}"
+
+  local r2
+  r2="$(curl -sS -m 12 -A "$UA" -G "http://$host:$EP_HTTP_PORT/eportal/portal/cas/logout" \
+        --data-urlencode "callback=dr$RANDOM$RANDOM" \
+        --data-urlencode "wlan_user_ip=${ip:-}" \
+        --data-urlencode "jsVersion=4.2.1" 2>/dev/null)"
+  log "cas/logout   -> ${r2:0:200}"
+
+  sleep 2
+  if online; then
+    log "still online after logout - either the portal needs a moment, or the session belongs to a router/NAT in front of this machine"
+    return 2
+  fi
+  log "logged out"
+  return 0
+}
+
+if [ "$LOGOUT" = 1 ]; then logout_now; exit $?; fi
 
 if [ "$FORCE" = 0 ] && online; then log "already online, nothing to do"; exit 0; fi
 if [ "$CHECK" = 1 ]; then log "not online"; exit 1; fi
@@ -196,12 +247,14 @@ if [ "$DRY" = 1 ]; then
 fi
 
 # ---------------------------------------------------------------- 5. POST to CAS
+# The encrypted password is fed through stdin (--data-urlencode password@-) so it
+# never shows up in the process list.
 HDR="$WORK/post.hdr"; OUT="$WORK/post.html"
-curl -sS -m 25 -A "$UA" -b "$JAR" -c "$JAR" -L --max-redirs 10 \
+printf '%s' "__RSA__$ENC" | curl -sS -m 25 -A "$UA" -b "$JAR" -c "$JAR" -L --max-redirs 10 \
   -H "Referer: $AUTHZ" -H "Origin: ${CAS_BASE%/cas}" \
   -D "$HDR" -o "$OUT" \
   --data-urlencode "username=$USERNAME" \
-  --data-urlencode "password=__RSA__$ENC" \
+  --data-urlencode "password@-" \
   --data-urlencode "execution=$EXEC" \
   --data-urlencode "_eventId=submit" \
   --data-urlencode "geolocation=" \
