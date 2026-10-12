@@ -42,6 +42,7 @@ $Probe    = 'http://connect.rom.miui.com/generate_204'
 $Portal   = 'https://rz.hstc.edu.cn'
 $CasBase  = 'https://hscas.hstc.edu.cn/cas'
 $EpPort   = 801
+$EpHttpsPort = 802
 $UA       = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 $WorkDir  = Join-Path $env:TEMP 'campus-sso'
 $Jar      = Join-Path $WorkDir 'cookies.txt'
@@ -72,12 +73,13 @@ $script:SslNoRevoke = ($script:CurlVer -match 'Schannel')
 
 # ---------------------------------------------------------------- HTTP helpers
 function RunCurl {
-    param([string[]]$Extra, [string]$Label = 'curl')
+    param([string[]]$Extra, [string]$Label = 'curl', [string]$Referer = '')
     Remove-Item $Hdr, $Body -ErrorAction SilentlyContinue
     $errFile = Join-Path $WorkDir 'curl.err'
     Remove-Item $errFile -ErrorAction SilentlyContinue
     $a = @('-sS','-D',$Hdr,'-o',$Body,'--max-time','25','-A',$UA)
     if ($script:SslNoRevoke) { $a += '--ssl-no-revoke' }
+    if ($Referer) { $a += @('-H', "Referer: $Referer") }
     $a += $Extra
     & curl.exe @a 2>$errFile | Out-Null
     $script:CurExit = $LASTEXITCODE
@@ -105,35 +107,91 @@ function Test-Online {
 }
 
 # ---------------------------------------------------------------- logout
-# Mirrors logout.default_logout() -> portal_logout() -> custom.identity_logout():
-# drop the network session first, then the CAS single sign-on.
-function Do-Logout {
-    $hostOnly = ([regex]::Match($Portal, '^https?://([^/]+)')).Groups[1].Value -replace ':\d+$', ''
-    Say "logging out of the portal: $Portal/drcom/logout"
-    RunCurl -Extra @('-G', "$Portal/drcom/logout",
-        '--data-urlencode', "callback=dr$((Get-Random))",
-        '--data-urlencode', 'jsVersion=4.1') -Label 'drcom/logout'
-    $r1 = BodyText; if ($r1.Length -gt 160) { $r1 = $r1.Substring(0, 160) }
-    Say "drcom/logout -> $r1"
-
-    $lip = ''
+# This deployment's portal does not use /drcom/logout: with unBindMac=1 its page
+# calls user.unbind_mac(), which posts to mac/unbind with unbind_type=1. Taken
+# from the page's own traffic:
+#   GET :802/eportal/portal/mac/unbind?user_account=..&wlan_user_mac=000000000000
+#       &wlan_user_ip=..&wlan_user_ipv6=::&unbind_type=1&...
+#   GET :802/eportal/portal/cas/logout?wlan_user_ip=..  -> follow the switch_uri
+function Get-LocalIp {
     try {
-        $lip = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
+        return (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
                 Where-Object { $_.IPAddress -notlike '127.*' } |
                 Select-Object -First 1).IPAddress
-    } catch { }
-    RunCurl -Extra @('-G', "http://${hostOnly}:$EpPort/eportal/portal/cas/logout",
-        '--data-urlencode', "callback=dr$((Get-Random))",
-        '--data-urlencode', "wlan_user_ip=$lip",
-        '--data-urlencode', 'jsVersion=4.2.1') -Label 'cas/logout'
-    $r2 = BodyText; if ($r2.Length -gt 200) { $r2 = $r2.Substring(0, 200) }
-    Say "cas/logout   -> $r2"
+    } catch { return '' }
+}
+
+$script:PageProgram = ''
+$script:PageIndex   = ''
+# Every portal jsonp call carries program_index / page_index / v / lang on top of
+# callback+jsVersion (see util._jsonp). wlan_ac_ip and wlan_user_ipv6 have to be
+# present even when empty, otherwise loadConfig answers with an error.
+function Get-PageIndices([string]$ClientIp) {
+    if ($script:PageProgram -and $script:PageIndex) { return }
+    if (-not $ClientIp) { return }
+    $h   = ([regex]::Match($Portal, '^https?://([^/]+)')).Groups[1].Value -replace ':\d+$', ''
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($ClientIp))
+    RunCurl -Extra @("http://${h}:$EpPort/eportal/portal/page/loadConfig?callback=cb&program_index=&wlan_user_ip=$b64&wlan_ac_ip=&wlan_user_ipv6=&jsVersion=4.1") -Label 'loadConfig'
+    $r  = BodyText
+    $m1 = [regex]::Match($r, '"program_index":"([^"]*)"')
+    $m2 = [regex]::Match($r, '"page_index":"([^"]*)"')
+    if ($m1.Success) { $script:PageProgram = $m1.Groups[1].Value }
+    if ($m2.Success) { $script:PageIndex   = $m2.Groups[1].Value }
+}
+
+function Do-Logout {
+    $h    = ([regex]::Match($Portal, '^https?://([^/]+)')).Groups[1].Value -replace ':\d+$', ''
+    $base = "https://${h}:$EpHttpsPort/eportal/portal"
+    $ref  = "https://${h}/"
+    $rnd  = Get-Random -Minimum 1000 -Maximum 9999
+
+    # Ask the portal who we are: uid is the account, ss5 is the client IP as the
+    # portal itself sees it. Both are needed by the unbind call below.
+    RunCurl -Extra @("$Portal/drcom/chkstatus?callback=cb&jsVersion=4.2.2") -Label 'chkstatus'
+    $st  = BodyText
+    $uid = ([regex]::Match($st, '"uid":"([^"]*)"')).Groups[1].Value
+    $cip = ([regex]::Match($st, '"ss5":"([^"]*)"')).Groups[1].Value
+    if (-not $cip) { $cip = Get-LocalIp }
+    Get-PageIndices $cip
+    Say "portal sees us as uid=$(if ($uid) { $uid } else { '?' }) ip=$(if ($cip) { $cip } else { '?' })"
+
+    # 1) Unbind the terminal MAC - this is the call that actually drops the session.
+    RunCurl -Extra @('-G', "$base/mac/unbind",
+        '--data-urlencode', "callback=dr$rnd",
+        '--data-urlencode', "user_account=$uid",
+        '--data-urlencode', 'wlan_user_mac=000000000000',
+        '--data-urlencode', "wlan_user_ip=$cip",
+        '--data-urlencode', 'wlan_user_ipv6=::',
+        '--data-urlencode', 'unbind_type=1',
+        '--data-urlencode', 'jsVersion=4.2.2',
+        '--data-urlencode', "program_index=$($script:PageProgram)",
+        '--data-urlencode', "page_index=$($script:PageIndex)",
+        '--data-urlencode', "v=$((Get-Random -Minimum 500 -Maximum 10500))",
+        '--data-urlencode', 'lang=zh-cn') -Label 'mac/unbind' -Referer $ref
+    Say "mac/unbind   -> $(BodyText)"
 
     Start-Sleep -Seconds 2
-    if (Test-Online) {
-        Say 'still online after logout - either the portal needs a moment, or the session belongs to a router/NAT in front of this machine'
-        Bye 2
+    if (-not (Test-Online)) { Say 'logged out'; Bye 0 }
+
+    # 2) CAS single sign-on sign-off, then follow the returned switch_uri.
+    RunCurl -Extra @('-G', "$base/cas/logout",
+        '--data-urlencode', "callback=dr$($rnd + 1)",
+        '--data-urlencode', "wlan_user_ip=$cip",
+        '--data-urlencode', 'jsVersion=4.2.2',
+        '--data-urlencode', "program_index=$($script:PageProgram)",
+        '--data-urlencode', "page_index=$($script:PageIndex)",
+        '--data-urlencode', "v=$((Get-Random -Minimum 500 -Maximum 10500))",
+        '--data-urlencode', 'lang=zh-cn') -Label 'cas/logout' -Referer $ref
+    $r2 = BodyText
+    Say "cas/logout   -> $r2"
+    $sw = ([regex]::Match($r2, '"switch_uri":"([^"]*)"')).Groups[1].Value -replace '\\/', '/'
+    if ($sw) {
+        Say "cas logout redirect -> $sw"
+        RunCurl -Extra @($sw) -Label 'cas logout'
     }
+
+    Start-Sleep -Seconds 3
+    if (Test-Online) { Say 'still online after logout'; Bye 2 }
     Say 'logged out'
     Bye 0
 }
@@ -198,8 +256,13 @@ Say "ip=$wip mac=$umac ac=$acip/$acname portal=${scheme}://${phost}"
 $ep = "http://${phost}:$EpPort/eportal/portal"
 
 # ---------------------------------------------------------------- 2. cas/create
+Get-PageIndices $wip
 RunCurl -Extra @('-G', "$ep/cas/create",
     '--data-urlencode', 'callback=cb',
+    '--data-urlencode', "program_index=$($script:PageProgram)",
+    '--data-urlencode', "page_index=$($script:PageIndex)",
+    '--data-urlencode', "v=$((Get-Random -Minimum 500 -Maximum 10500))",
+    '--data-urlencode', 'lang=zh-cn',
     '--data-urlencode', 'login_method=1',
     '--data-urlencode', "wlan_user_ip=$wip",
     '--data-urlencode', "wlan_user_mac=$umac",

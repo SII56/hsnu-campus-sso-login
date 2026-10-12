@@ -30,10 +30,14 @@
 #   4) A successful POST redirects to  service?ticket=ST-...  and the portal
 #      then completes the network authentication.
 #
-# Logging out mirrors logout.default_logout() -> portal_logout() ->
-# custom.identity_logout():
-#      GET <portal>/drcom/logout?callback=..&jsVersion=4.1
-#      GET <portal>:801/eportal/portal/cas/logout?wlan_user_ip=..
+# Logging out is NOT the usual /drcom/logout. A HAR capture of this deployment's
+# own portal page showed that with unBindMac=1 it calls user.unbind_mac() instead:
+#      GET <portal>:802/eportal/portal/mac/unbind
+#            ?user_account=..&wlan_user_mac=000000000000&wlan_user_ip=..
+#            &wlan_user_ipv6=::&unbind_type=1&...
+#      GET <portal>:802/eportal/portal/cas/logout?wlan_user_ip=..
+#            -> then follow the returned switch_uri to clear the CAS session
+# /drcom/logout answers "Logout Error(no webmode)" for a session created via CAS.
 #
 # If CAS already trusts this client (IP-level SSO, or the authorisation link it
 # just registered) it returns a ticket straight away, with no login form at all.
@@ -84,7 +88,7 @@ for arg in "$@"; do case "$arg" in
   --relogin) RELOGIN=1 ;;
   --force)   FORCE=1 ;;
   --dry-run) DRY=1; FORCE=1 ;;
-  -h|--help) sed -n '2,55p' "$0"; exit 0 ;;
+  -h|--help) awk 'NR>1 && /^set -u/{exit} NR>1{print}' "$0"; exit 0 ;;
   *) echo "unknown option: $arg" >&2; exit 2 ;;
 esac; done
 

@@ -1,6 +1,7 @@
 # campus.conf - configuration for campus-sso-login.sh
+# campus.conf.ps1 - the Windows equivalent, dot-sourced by campus-sso-login.ps1
 #
-# Keep this file private:   chmod 600 campus.conf
+# Keep it private:  chmod 600 campus.conf      (Windows: just do not commit it)
 # It is not tracked by git (see .gitignore).
 
 # Your unified-identity (CAS) account.
@@ -9,12 +10,15 @@ CAMPUS_PASS="your-password"
 
 # Credentials are only used when CAS actually serves a login form. If the client
 # is already trusted (IP-level SSO) the script gets a ticket without them.
+# Leave the file out entirely if you prefer to be prompted each time.
 
 # ---------------------------------------------------------------------------
 # Optional overrides - the defaults already target hstc.
 # ---------------------------------------------------------------------------
+# CAMPUS_PORTAL="https://rz.hstc.edu.cn"
 # CAMPUS_CAS="https://hscas.hstc.edu.cn/cas"
-# CAMPUS_EP_HTTP_PORT="801"
+# CAMPUS_EP_HTTP_PORT="801"        # eportal API, plain HTTP (login)
+# CAMPUS_EP_HTTPS_PORT="802"       # eportal API, HTTPS (logout / mac unbind)
 # CAMPUS_LOG="/tmp/campus-sso-login.log"
 # CAMPUS_WORK="/tmp/campus-sso"
 
