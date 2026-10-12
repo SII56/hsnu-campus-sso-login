@@ -18,10 +18,14 @@ powershell -ExecutionPolicy Bypass -File .\campus-sso-login.ps1
 会提示输入学号和密码（密码不回显）。其它参数：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\campus-sso-login.ps1 -Check    # 只看在不在线
-powershell -ExecutionPolicy Bypass -File .\campus-sso-login.ps1 -DryRun   # 走完整条链路，但不提交密码
-powershell -ExecutionPolicy Bypass -File .\campus-sso-login.ps1 -Logout   # 注销
-powershell -ExecutionPolicy Bypass -File .\campus-sso-login.ps1 -Force    # 忽略在线状态，强制认证
+# 只看在不在线
+powershell -ExecutionPolicy Bypass -File .\campus-sso-login.ps1 -Check 
+# 走完整条链路，但不提交密码
+powershell -ExecutionPolicy Bypass -File .\campus-sso-login.ps1 -DryRun
+# 注销 
+powershell -ExecutionPolicy Bypass -File .\campus-sso-login.ps1 -Logout
+# 忽略在线状态，强制认证
+powershell -ExecutionPolicy Bypass -File .\campus-sso-login.ps1 -Force
 ```
 
 需要 Windows 10 1803 以上（要用系统自带的 `curl.exe`）和 PowerShell 5.1 以上。
@@ -34,14 +38,23 @@ $CAMPUS_PASS = "your-password"
 ```
 
 ## Linux / macOS
-
+先添加权限
 ```bash
 chmod +x campus-sso-login.sh
-
-./campus-sso-login.sh            # 已在线就跳过，否则认证
+```
+输入执行
+```bash
+./campus-sso-login.sh
+```
+会提示输入学号和密码（密码不回显）。其它参数：
+```bash
+# 只看在不在线
 ./campus-sso-login.sh --check
+# 走完整条链路，但不提交密码
 ./campus-sso-login.sh --dry-run
+# 注销
 ./campus-sso-login.sh --logout
+# 忽略在线状态，强制认证
 ./campus-sso-login.sh --force
 ```
 
