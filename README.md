@@ -45,38 +45,6 @@ chmod +x campus-sso-login.sh
 ./campus-sso-login.sh --force
 ```
 
-## 注销做了什么
-
-按**浏览器真实发出的请求**（用 DevTools 导出 HAR 抓到的）依次两步：
-
-**1. 解绑终端 MAC —— 这一步才是真正断网的**
-
-```
-GET https://<门户>:802/eportal/portal/mac/unbind
-      ?callback=dr1002&user_account=<学号>&wlan_user_mac=000000000000
-      &wlan_user_ip=<本机IP>&wlan_user_ipv6=::&unbind_type=1
-      &jsVersion=4.2.2&program_index=..&page_index=..&v=..&lang=..
-    -> {"result":1,"msg":"Unbind Terminal Mac successful!"}
-```
-
-注意这里**不是** `/drcom/logout`。门户 JS 在 `unBindMac == 1` 时走的是
-`user.unbind_mac()` 分支，而 `/drcom/logout` 对走统一身份认证建立的会话会回
-`Logout Error(no webmode)`。照抄前者才对。
-
-**2. 注销 CAS 单点登录**
-
-```
-GET https://<门户>:802/eportal/portal/cas/logout?...
-    -> {"result":1,"switch_uri":"https://hscas.hstc.edu.cn/cas/logout?..."}
-```
-
-拿到 `switch_uri` 后还要跟过去，CAS 那边的登录态才会清掉。
-
-脚本会先调 `chkstatus` 取出自己的 `uid`（账号）和 `ss5`（门户眼中的本机 IP），
-再用它们组装上面两条请求。请求都带 `Referer: https://<门户>/`。
-
-> 注销后你会掉线。想省事可以用 `--logout --relogin`，脚本会注销后自动登回来。
-
 ## 账号密码
 
 ```bash
