@@ -1,12 +1,12 @@
-# hsnu-campus-sso-login
+# hstc-campus-sso-login
 
 韩师校园网无头登录。没有浏览器、没有桌面客户端也能认证上网。
 
 仓库里两个脚本：`campus-sso-login.sh`（Linux / macOS）和 `campus-sso-login.ps1`（Windows）。
 
 ```bash
-git clone https://github.com/SII56/hsnu-campus-sso-login.git
-cd hsnu-campus-sso-login
+git clone https://github.com/SII56/hstc-campus-sso-login.git
+cd hstc-campus-sso-login
 ```
 
 ## Windows
