@@ -236,14 +236,19 @@ fi
 log "portal redirect: $REDIR"
 
 getq(){ printf '%s' "$1" | sed -n "s/.*[?&]$2=\([^&]*\).*/\1/p"; }
+# Some ACs hand out the parameters URL-encoded (wlanssid=HSTC%5FWIFI,
+# wlanacname=AC1%5FMaster, wlanacip=172%2E16%2E100%2E11), others do not.
+urldecode(){ printf '%b' "$(printf '%s' "$1" | sed 's/%/\\x/g')"; }
 SCHEME="$(printf '%s' "$REDIR" | sed -E 's#^(https?)://.*#\1#')"
 PHOST="$(printf '%s' "$REDIR" | sed -E 's#^https?://([^/]+).*#\1#' | sed -E 's#:[0-9]+$##')"
-WIP="$(getq "$REDIR" wlanuserip)"
+WIP="$(urldecode "$(getq "$REDIR" wlanuserip)")"
+# The client MAC is called usermac on some ACs and wlanusermac on others.
 UMAC="$(getq "$REDIR" usermac)"
-ACIP="$(getq "$REDIR" wlanacip)"
-ACNAME="$(getq "$REDIR" wlanacname)"
+[ -n "$UMAC" ] || UMAC="$(getq "$REDIR" wlanusermac)"
+ACIP="$(urldecode "$(getq "$REDIR" wlanacip)")"
+ACNAME="$(urldecode "$(getq "$REDIR" wlanacname)")"
 UMAC="$(printf '%s' "$UMAC" | tr -d ':-' | tr 'A-F' 'a-f')"
-[ -n "$WIP" ] && [ -n "$UMAC" ] || die "redirect is missing wlanuserip/usermac: $REDIR"
+[ -n "$WIP" ] && [ -n "$UMAC" ] || die "redirect is missing wlanuserip and usermac/wlanusermac: $REDIR"
 log "ip=$WIP mac=$UMAC ac=$ACIP/$ACNAME portal=$SCHEME://$PHOST"
 
 # The eportal API is served in plain HTTP on 801 for both the hostname and the

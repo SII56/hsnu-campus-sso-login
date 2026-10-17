@@ -247,11 +247,16 @@ function Get-Q([string]$u, [string]$n) {
 
 $scheme = ([regex]::Match($redir, '^(https?)://')).Groups[1].Value
 $phost  = ([regex]::Match($redir, '^https?://([^/]+)')).Groups[1].Value -replace ':\d+$', ''
-$wip    = Get-Q $redir 'wlanuserip'
+# Some ACs hand out the parameters URL-encoded (wlanssid=HSTC%5FWIFI,
+# wlanacname=AC1%5FMaster, wlanacip=172%2E16%2E100%2E11), others do not.
+function URL-Dec([string]$s) { if ($s) { return [uri]::UnescapeDataString($s) } return $s }
+$wip    = URL-Dec (Get-Q $redir 'wlanuserip')
+# The client MAC is called usermac on some ACs and wlanusermac on others.
 $umac   = (Get-Q $redir 'usermac') -replace '[:-]', ''
-$acip   = Get-Q $redir 'wlanacip'
-$acname = Get-Q $redir 'wlanacname'
-if (-not $wip -or -not $umac) { Die "Redirect missing wlanuserip/usermac: $redir" }
+if (-not $umac) { $umac = (Get-Q $redir 'wlanusermac') -replace '[:-]', '' }
+$acip   = URL-Dec (Get-Q $redir 'wlanacip')
+$acname = URL-Dec (Get-Q $redir 'wlanacname')
+if (-not $wip -or -not $umac) { Die "Redirect missing wlanuserip and usermac/wlanusermac: $redir" }
 Say "ip=$wip mac=$umac ac=$acip/$acname portal=${scheme}://${phost}"
 
 # eportal API: plain HTTP on 801 works for both the domain and the raw IP,
