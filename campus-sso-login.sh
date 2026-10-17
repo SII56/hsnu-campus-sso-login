@@ -216,10 +216,23 @@ if [ "$CHECK" = 1 ]; then log "not online"; exit 1; fi
 if [ -n "$FORCE_REDIRECT" ]; then
   REDIR="$FORCE_REDIRECT"
 else
-  BODY="$(curl -s -m 8 -A "$UA" "$PROBE" 2>/dev/null)"
-  REDIR="$(printf '%s' "$BODY" | LC_ALL=C grep -oE "https?://[^'\"]+" | head -1)"
+  # The captive portal either answers with a Location header or with a 200 page
+  # whose body contains the redirect. Only accept a URL that carries the client
+  # parameters - otherwise some unrelated URL in an error/XML page gets picked up.
+  CODE="$(curl -s -m 8 -A "$UA" -D "$WORK/probe.hdr" -o "$WORK/probe.body" \
+          -w '%{http_code}' "$PROBE" 2>/dev/null)"
+  if [ "$CODE" = "204" ]; then log "already online, nothing to do"; exit 0; fi
+  REDIR="$(LC_ALL=C grep -i '^location:' "$WORK/probe.hdr" 2>/dev/null | head -1 \
+           | sed 's/^[Ll]ocation:[[:space:]]*//' | tr -d '\r')"
+  if [ -z "$REDIR" ]; then
+    REDIR="$(LC_ALL=C grep -oE "https?://[^'\"<> ]*wlanuserip=[^'\"<> ]*" "$WORK/probe.body" 2>/dev/null | head -1)"
+  fi
+  if [ -z "$REDIR" ]; then
+    log "probe returned HTTP ${CODE:-?} but no portal redirect was found"
+    log "first bytes: $(head -c 160 "$WORK/probe.body" 2>/dev/null | tr -d '\n')"
+    die "this machine does not look like it is on the campus network (ip $(local_ip 2>/dev/null))"
+  fi
 fi
-[ -n "$REDIR" ] || die "no portal redirect captured (maybe already online - try --force)"
 log "portal redirect: $REDIR"
 
 getq(){ printf '%s' "$1" | sed -n "s/.*[?&]$2=\([^&]*\).*/\1/p"; }

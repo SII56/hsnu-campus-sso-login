@@ -224,15 +224,18 @@ else {
     $pc = Status
     if ($pc -eq 204) { Say 'Already online, nothing to do'; Bye 0 }
     $redir = HdrVal 'Location'
-    if (-not $redir) { $redir = ([regex]::Match((BodyText), "https?://[^'`"]+")).Value }
+    # Only accept a URL that carries the client parameters; otherwise an unrelated
+    # URL from an error/XML page would be picked up (e.g. an XML namespace).
+    if (-not $redir) { $redir = ([regex]::Match((BodyText), "https?://[^'`"<> ]*wlanuserip=[^'`"<> ]*")).Value }
     if (-not $redir) {
         $b = BodyText
-        if ($b.Length -gt 200) { $b = $b.Substring(0, 200) }
+        if ($b.Length -gt 160) { $b = $b.Substring(0, 160) }
         Say ("probe HTTP status = {0}" -f $pc)
-        Say ("probe body = [{0}]" -f $b)
+        Say ("probe first bytes = [{0}]" -f $b)
         Say ("curl exit = {0}" -f $script:CurExit)
         Say ("curl stderr = " + $(if ($script:CurErr) { $script:CurErr } else { '(empty)' }))
-        Die 'No portal redirect. Pass -Redirect "<url>" or check the portal.'
+        Say ("this host's ip = " + (Get-LocalIp))
+        Die 'this machine does not look like it is on the campus network (use -Redirect to override)'
     }
 }
 Say "Portal redirect: $redir"
