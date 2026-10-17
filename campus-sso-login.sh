@@ -281,6 +281,7 @@ for base in "http://$PHOST:$EP_HTTP_PORT/eportal/portal" \
             "http://rz.hstc.edu.cn:$EP_HTTP_PORT/eportal/portal" \
             "https://rz.hstc.edu.cn:$EP_HTTPS_PORT/eportal/portal"; do
     page_indices "$base" "$WIP"
+    rm -f "$WORK/create.body" "$WORK/create.hdr" "$WORK/create.err"
     CODE="$(curl -sS -o "$WORK/create.body" -D "$WORK/create.hdr" -w '%{http_code}' \
       --connect-timeout 5 -m 10 -A "$UA" -H "Referer: $REDIR" -G "$base/cas/create" \
       --data-urlencode "callback=cb" \
@@ -295,6 +296,7 @@ for base in "http://$PHOST:$EP_HTTP_PORT/eportal/portal" \
       --data-urlencode "wlan_ac_name=$ACNAME" \
       --data-urlencode "mac_type=0" \
       --data-urlencode "jsVersion=4.1" 2>"$WORK/create.err")"
+    [ -s "$WORK/create.hdr" ] || { log "  -> unreachable, skipping"; continue; }
     CREATE="$(cat "$WORK/create.body" 2>/dev/null)"
     log "cas/create @ $base -> HTTP ${CODE:-000}, ${#CREATE} bytes, indices=${PAGE_PROGRAM:-none}/${PAGE_INDEX:-none}"
     [ -s "$WORK/create.err" ] && log "  curl: $(tr -d '\n' < "$WORK/create.err")"
@@ -310,8 +312,10 @@ log "authorize_uri: $AUTHZ"
 # login page, so follow a few hops manually and keep the cookie jar.
 CAS_URL="$AUTHZ"; CAS_PAGE=""; TICKET_SEEN=0
 for _hop in 1 2 3 4 5 6; do
+  rm -f "$WORK/cas.hdr" "$WORK/cas.body" "$WORK/cas.err"
   curl -sS -m 15 -A "$UA" -c "$JAR" -b "$JAR" -D "$WORK/cas.hdr" -o "$WORK/cas.body" "$CAS_URL" 2>"$WORK/cas.err"
   CAS_PAGE="$(cat "$WORK/cas.body" 2>/dev/null)"
+  [ -s "$WORK/cas.hdr" ] || { log "cas page: unreachable"; break; }
   ST="$(LC_ALL=C head -1 "$WORK/cas.hdr" 2>/dev/null | sed -n 's#^HTTP/[0-9.]* \([0-9]*\).*#\1#p')"
   LOC="$(LC_ALL=C grep -i '^location:' "$WORK/cas.hdr" 2>/dev/null | head -1 | sed 's/^[Ll]ocation:[[:space:]]*//' | tr -d '\r')"
   log "cas page: HTTP ${ST:-?}, ${#CAS_PAGE} bytes, first hdr line: $(LC_ALL=C head -1 "$WORK/cas.hdr" 2>/dev/null | tr -d "\r")"
@@ -374,6 +378,7 @@ fi
 # The encrypted password is fed through stdin (--data-urlencode password@-) so it
 # never shows up in the process list.
 HDR="$WORK/post.hdr"; OUT="$WORK/post.html"
+rm -f "$HDR" "$OUT"
 printf '%s' "__RSA__$ENC" | curl -sS -m 25 -A "$UA" -b "$JAR" -c "$JAR" -L --max-redirs 10 \
   -H "Referer: $AUTHZ" -H "Origin: ${CAS_BASE%/cas}" \
   -D "$HDR" -o "$OUT" 2>"$WORK/post.err" \
