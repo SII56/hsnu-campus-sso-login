@@ -236,6 +236,23 @@ fi
 log "portal redirect: $REDIR"
 
 getq(){ printf '%s' "$1" | sed -n "s/.*[?&]$2=\([^&]*\).*/\1/p"; }
+# The portal page itself declares the eportal ports (epHTTPPort / enHTTPSPort).
+# Do not assume 801/802: some VLANs refuse those but serve the page on port 80.
+page_ports(){
+  local html
+  html="$(curl -sS --connect-timeout 5 -m 8 -A "$UA" "$REDIR" 2>/dev/null)"
+  local h t
+  h="$(printf '%s' "$html" | LC_ALL=C sed -n 's/.*epHTTPPort *= *\([0-9][0-9]*\).*/\1/p' | head -1)"
+  t="$(printf '%s' "$html" | LC_ALL=C sed -n 's/.*enHTTPSPort *= *\([0-9][0-9]*\).*/\1/p' | head -1)"
+  [ -n "$h" ] && EP_HTTP_PORT="$h"
+  [ -n "$t" ] && EP_HTTPS_PORT="$t"
+  if [ -n "$h" ] || [ -n "$t" ]; then
+    log "portal page declares: http port ${EP_HTTP_PORT}, https port ${EP_HTTPS_PORT}"
+  else
+    log "could not read the portal page; using default ports ${EP_HTTP_PORT}/${EP_HTTPS_PORT}"
+  fi
+}
+
 # Some ACs hand out the parameters URL-encoded (wlanssid=HSTC%5FWIFI,
 # wlanacname=AC1%5FMaster, wlanacip=172%2E16%2E100%2E11), others do not.
 urldecode(){ printf '%b' "$(printf '%s' "$1" | sed 's/%/\\x/g')"; }
@@ -250,6 +267,7 @@ ACNAME="$(urldecode "$(getq "$REDIR" wlanacname)")"
 UMAC="$(printf '%s' "$UMAC" | tr -d ':-' | tr 'A-F' 'a-f')"
 [ -n "$WIP" ] && [ -n "$UMAC" ] || die "redirect is missing wlanuserip and usermac/wlanusermac: $REDIR"
 log "ip=$WIP mac=$UMAC ac=$ACIP/$ACNAME portal=$SCHEME://$PHOST"
+page_ports
 
 # The eportal API is served in plain HTTP on 801 for both the hostname and the
 # bare IP, which also sidesteps any certificate trouble on port 802.
@@ -257,11 +275,13 @@ log "ip=$WIP mac=$UMAC ac=$ACIP/$ACNAME portal=$SCHEME://$PHOST"
 # Which eportal base answers depends on the AC/VLAN the client sits on, so try
 # the plain-HTTP and HTTPS variants of both the discovered host and the domain.
 AUTHZ=""
-for tryhost in "$PHOST" "rz.hstc.edu.cn"; do
-  for base in "http://$tryhost:$EP_HTTP_PORT/eportal/portal" \
-              "https://$tryhost:$EP_HTTPS_PORT/eportal/portal"; do
+for base in "http://$PHOST:$EP_HTTP_PORT/eportal/portal" \
+            "https://$PHOST:$EP_HTTPS_PORT/eportal/portal" \
+            "http://$PHOST/eportal/portal" \
+            "http://rz.hstc.edu.cn:$EP_HTTP_PORT/eportal/portal" \
+            "https://rz.hstc.edu.cn:$EP_HTTPS_PORT/eportal/portal"; do
     page_indices "$base" "$WIP"
-    CODE="$(curl -s -o "$WORK/create.body" -D "$WORK/create.hdr" -w '%{http_code}' \
+    CODE="$(curl -sS -o "$WORK/create.body" -D "$WORK/create.hdr" -w '%{http_code}' \
       --connect-timeout 5 -m 10 -A "$UA" -H "Referer: $REDIR" -G "$base/cas/create" \
       --data-urlencode "callback=cb" \
       --data-urlencode "program_index=$PAGE_PROGRAM" \
@@ -280,8 +300,7 @@ for tryhost in "$PHOST" "rz.hstc.edu.cn"; do
     [ -s "$WORK/create.err" ] && log "  curl: $(tr -d '\n' < "$WORK/create.err")"
     [ -n "$CREATE" ] && log "  body: $(printf '%s' "$CREATE" | head -c 220)"
     AUTHZ="$(printf '%s' "$CREATE" | sed -n 's/.*"authorize_uri":"\([^"]*\)".*/\1/p' | sed 's#\\/#/#g')"
-    [ -n "$AUTHZ" ] && break 2
-  done
+    [ -n "$AUTHZ" ] && break
 done
 [ -n "$AUTHZ" ] || die "cas/create failed on every endpoint (see $WORK/create.body / create.err)"
 log "authorize_uri: $AUTHZ"
