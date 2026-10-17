@@ -6,3 +6,6 @@ campus.conf
 *.hdr
 *.body
 *.pem
+
+# macOS
+.DS_Store
