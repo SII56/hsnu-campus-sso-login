@@ -314,7 +314,7 @@ for _hop in 1 2 3 4 5 6; do
   CAS_PAGE="$(cat "$WORK/cas.body" 2>/dev/null)"
   ST="$(LC_ALL=C head -1 "$WORK/cas.hdr" 2>/dev/null | sed -n 's#^HTTP/[0-9.]* \([0-9]*\).*#\1#p')"
   LOC="$(LC_ALL=C grep -i '^location:' "$WORK/cas.hdr" 2>/dev/null | head -1 | sed 's/^[Ll]ocation:[[:space:]]*//' | tr -d '\r')"
-  log "cas page: HTTP ${ST:-?}, ${#CAS_PAGE} bytes"
+  log "cas page: HTTP ${ST:-?}, ${#CAS_PAGE} bytes, first hdr line: $(LC_ALL=C head -1 "$WORK/cas.hdr" 2>/dev/null | tr -d "\r")"
   case "$ST" in 30*) ;; *) break ;; esac
   [ -n "$LOC" ] || break
   case "$LOC" in *ticket=ST-*) TICKET_SEEN=1 ;; esac
@@ -376,7 +376,7 @@ fi
 HDR="$WORK/post.hdr"; OUT="$WORK/post.html"
 printf '%s' "__RSA__$ENC" | curl -sS -m 25 -A "$UA" -b "$JAR" -c "$JAR" -L --max-redirs 10 \
   -H "Referer: $AUTHZ" -H "Origin: ${CAS_BASE%/cas}" \
-  -D "$HDR" -o "$OUT" \
+  -D "$HDR" -o "$OUT" 2>"$WORK/post.err" \
   --data-urlencode "username=$USERNAME" \
   --data-urlencode "password@-" \
   --data-urlencode "execution=$EXEC" \
@@ -386,6 +386,11 @@ printf '%s' "__RSA__$ENC" | curl -sS -m 25 -A "$UA" -b "$JAR" -c "$JAR" -L --max
   --data-urlencode "currentMenu=1" \
   --data-urlencode "failN=-1" \
   "$AUTHZ" 2>/dev/null
+
+if [ -s "$WORK/post.err" ]; then
+  log "post curl said: $(tr -d '\n' < "$WORK/post.err")"
+fi
+log "post: HTTP $(LC_ALL=C head -1 "$HDR" 2>/dev/null | tr -d '\r'), $(wc -c < "$OUT" 2>/dev/null | tr -d ' ') bytes"
 
 if LC_ALL=C grep -qi 'ticket=ST-' "$HDR"; then
   log "CAS issued a ticket"
