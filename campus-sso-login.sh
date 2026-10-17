@@ -119,13 +119,13 @@ local_ip(){
 # callback+jsVersion (see util._jsonp). The two indices come from loadConfig; note
 # that wlan_ac_ip and wlan_user_ipv6 must be present even when empty.
 page_indices(){
-  [ -n "$PAGE_PROGRAM" ] && [ -n "$PAGE_INDEX" ] && return 0
-  local ip="${1:-$(local_ip)}"
+  local base="$1" ip="$2"
+  PAGE_PROGRAM=""; PAGE_INDEX=""
+  [ -n "$ip" ] || return 1
   local b64; b64="$(printf '%s' "$ip" | base64 | tr -d '\n')"
-  local host="${PORTAL#*//}"; host="${host%%/*}"
   local r
-  r="$(curl -sS -m 12 -A "$UA" \
-       "http://$host:$EP_HTTP_PORT/eportal/portal/page/loadConfig?callback=cb&program_index=&wlan_user_ip=$b64&wlan_ac_ip=&wlan_user_ipv6=&jsVersion=4.1" 2>/dev/null)"
+  r="$(curl -sS --connect-timeout 4 -m 8 -A "$UA" \
+       "$base/page/loadConfig?callback=cb&program_index=&wlan_user_ip=$b64&wlan_ac_ip=&wlan_user_ipv6=&jsVersion=4.1" 2>/dev/null)"
   PAGE_PROGRAM="$(printf '%s' "$r" | sed -n 's/.*"program_index":"\([^"]*\)".*/\1/p')"
   PAGE_INDEX="$(printf '%s' "$r" | sed -n 's/.*"page_index":"\([^"]*\)".*/\1/p')"
 }
@@ -136,7 +136,7 @@ logout_now(){
   local base="https://$host:$EP_HTTPS_PORT/eportal/portal"
   local ref="https://$host/"
   local rnd; rnd=$((RANDOM % 9000 + 1000))
-  page_indices "$(local_ip)"
+  page_indices "$base" "$(local_ip)"
 
   # The portal tells us who we are: uid is the account, ss5 is the client IP as
   # the portal itself sees it. Both are needed by the unbind call below.
@@ -253,27 +253,37 @@ log "ip=$WIP mac=$UMAC ac=$ACIP/$ACNAME portal=$SCHEME://$PHOST"
 
 # The eportal API is served in plain HTTP on 801 for both the hostname and the
 # bare IP, which also sidesteps any certificate trouble on port 802.
-EP="http://$PHOST:$EP_HTTP_PORT/eportal/portal"
-
 # ---------------------------------------------------------------- 2. cas/create
-page_indices "$WIP"
-CREATE="$(curl -sS -m 12 -A "$UA" -G "$EP/cas/create" \
-  --data-urlencode "callback=cb" \
-  --data-urlencode "program_index=$PAGE_PROGRAM" \
-  --data-urlencode "page_index=$PAGE_INDEX" \
-  --data-urlencode "v=$((RANDOM % 10000 + 500))" \
-  --data-urlencode "lang=zh-cn" \
-  --data-urlencode "login_method=1" \
-  --data-urlencode "wlan_user_ip=$WIP" \
-  --data-urlencode "wlan_user_mac=$UMAC" \
-  --data-urlencode "wlan_ac_ip=$ACIP" \
-  --data-urlencode "wlan_ac_name=$ACNAME" \
-  --data-urlencode "mac_type=0" \
-  --data-urlencode "jsVersion=4.1" 2>/dev/null)"
-log "cas/create -> ${CREATE:0:160}"
-
-AUTHZ="$(printf '%s' "$CREATE" | sed -n 's/.*"authorize_uri":"\([^"]*\)".*/\1/p' | sed 's#\\/#/#g')"
-[ -n "$AUTHZ" ] || die "cas/create returned no authorize_uri: $CREATE"
+# Which eportal base answers depends on the AC/VLAN the client sits on, so try
+# the plain-HTTP and HTTPS variants of both the discovered host and the domain.
+AUTHZ=""
+for tryhost in "$PHOST" "rz.hstc.edu.cn"; do
+  for base in "http://$tryhost:$EP_HTTP_PORT/eportal/portal" \
+              "https://$tryhost:$EP_HTTPS_PORT/eportal/portal"; do
+    page_indices "$base" "$WIP"
+    CODE="$(curl -s -o "$WORK/create.body" -D "$WORK/create.hdr" -w '%{http_code}' \
+      --connect-timeout 5 -m 10 -A "$UA" -H "Referer: $REDIR" -G "$base/cas/create" \
+      --data-urlencode "callback=cb" \
+      --data-urlencode "program_index=$PAGE_PROGRAM" \
+      --data-urlencode "page_index=$PAGE_INDEX" \
+      --data-urlencode "v=$((RANDOM % 10000 + 500))" \
+      --data-urlencode "lang=zh-cn" \
+      --data-urlencode "login_method=1" \
+      --data-urlencode "wlan_user_ip=$WIP" \
+      --data-urlencode "wlan_user_mac=$UMAC" \
+      --data-urlencode "wlan_ac_ip=$ACIP" \
+      --data-urlencode "wlan_ac_name=$ACNAME" \
+      --data-urlencode "mac_type=0" \
+      --data-urlencode "jsVersion=4.1" 2>"$WORK/create.err")"
+    CREATE="$(cat "$WORK/create.body" 2>/dev/null)"
+    log "cas/create @ $base -> HTTP ${CODE:-000}, ${#CREATE} bytes, indices=${PAGE_PROGRAM:-none}/${PAGE_INDEX:-none}"
+    [ -s "$WORK/create.err" ] && log "  curl: $(tr -d '\n' < "$WORK/create.err")"
+    [ -n "$CREATE" ] && log "  body: $(printf '%s' "$CREATE" | head -c 220)"
+    AUTHZ="$(printf '%s' "$CREATE" | sed -n 's/.*"authorize_uri":"\([^"]*\)".*/\1/p' | sed 's#\\/#/#g')"
+    [ -n "$AUTHZ" ] && break 2
+  done
+done
+[ -n "$AUTHZ" ] || die "cas/create failed on every endpoint (see $WORK/create.body / create.err)"
 log "authorize_uri: $AUTHZ"
 
 # ---------------------------------------------------------------- 3. CAS entry
