@@ -126,12 +126,12 @@ $script:PageIndex   = ''
 # Every portal jsonp call carries program_index / page_index / v / lang on top of
 # callback+jsVersion (see util._jsonp). wlan_ac_ip and wlan_user_ipv6 have to be
 # present even when empty, otherwise loadConfig answers with an error.
-function Get-PageIndices([string]$ClientIp) {
-    if ($script:PageProgram -and $script:PageIndex) { return }
-    if (-not $ClientIp) { return }
-    $h   = ([regex]::Match($Portal, '^https?://([^/]+)')).Groups[1].Value -replace ':\d+$', ''
+function Get-PageIndices([string]$Base, [string]$ClientIp) {
+    $script:PageProgram = ''
+    $script:PageIndex   = ''
+    if (-not $ClientIp -or -not $Base) { return }
     $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($ClientIp))
-    RunCurl -Extra @("http://${h}:$EpPort/eportal/portal/page/loadConfig?callback=cb&program_index=&wlan_user_ip=$b64&wlan_ac_ip=&wlan_user_ipv6=&jsVersion=4.1") -Label 'loadConfig'
+    RunCurl -Extra @("$Base/page/loadConfig?callback=cb&program_index=&wlan_user_ip=$b64&wlan_ac_ip=&wlan_user_ipv6=&jsVersion=4.1") -Label 'loadConfig'
     $r  = BodyText
     $m1 = [regex]::Match($r, '"program_index":"([^"]*)"')
     $m2 = [regex]::Match($r, '"page_index":"([^"]*)"')
@@ -152,7 +152,7 @@ function Do-Logout {
     $uid = ([regex]::Match($st, '"uid":"([^"]*)"')).Groups[1].Value
     $cip = ([regex]::Match($st, '"ss5":"([^"]*)"')).Groups[1].Value
     if (-not $cip) { $cip = Get-LocalIp }
-    Get-PageIndices $cip
+    Get-PageIndices $base $cip
     Say "portal sees us as uid=$(if ($uid) { $uid } else { '?' }) ip=$(if ($cip) { $cip } else { '?' })"
 
     # 1) Unbind the terminal MAC - this is the call that actually drops the session.
@@ -259,32 +259,58 @@ $acname = URL-Dec (Get-Q $redir 'wlanacname')
 if (-not $wip -or -not $umac) { Die "Redirect missing wlanuserip and usermac/wlanusermac: $redir" }
 Say "ip=$wip mac=$umac ac=$acip/$acname portal=${scheme}://${phost}"
 
-# eportal API: plain HTTP on 801 works for both the domain and the raw IP,
-# and avoids any TLS/certificate issue. Verified against this campus.
-$ep = "http://${phost}:$EpPort/eportal/portal"
+# The portal page itself declares the eportal ports (epHTTPPort / enHTTPSPort).
+# Read them instead of assuming 801/802, then fall back to the defaults.
+$pageHtml = ''
+RunCurl -Extra @($redir) -Label 'portal page'
+$pageHtml = BodyText
+if ($pageHtml) {
+    $mh = [regex]::Match($pageHtml, 'epHTTPPort\s*=\s*(\d+)')
+    $mt = [regex]::Match($pageHtml, 'enHTTPSPort\s*=\s*(\d+)')
+    if ($mh.Success) { $EpPort = [int]$mh.Groups[1].Value }
+    if ($mt.Success) { $EpHttpsPort = [int]$mt.Groups[1].Value }
+    Say "portal page declares: http port $EpPort, https port $EpHttpsPort"
+} else {
+    Say "could not read the portal page; using default ports $EpPort/$EpHttpsPort"
+}
 
 # ---------------------------------------------------------------- 2. cas/create
-Get-PageIndices $wip
-RunCurl -Extra @('-G', "$ep/cas/create",
-    '--data-urlencode', 'callback=cb',
-    '--data-urlencode', "program_index=$($script:PageProgram)",
-    '--data-urlencode', "page_index=$($script:PageIndex)",
-    '--data-urlencode', "v=$((Get-Random -Minimum 500 -Maximum 10500))",
-    '--data-urlencode', 'lang=zh-cn',
-    '--data-urlencode', 'login_method=1',
-    '--data-urlencode', "wlan_user_ip=$wip",
-    '--data-urlencode', "wlan_user_mac=$umac",
-    '--data-urlencode', "wlan_ac_ip=$acip",
-    '--data-urlencode', "wlan_ac_name=$acname",
-    '--data-urlencode', 'mac_type=0',
-    '--data-urlencode', 'jsVersion=4.1') -Label 'cas/create'
-
-$create = BodyText
-if ($create.Length -gt 160) { Say ("cas/create -> " + $create.Substring(0, 160)) }
-
-$m = [regex]::Match($create, '"authorize_uri":"([^"]*)"')
-if (-not $m.Success) { Die "cas/create returned no authorize_uri: $create" }
-$authz = $m.Groups[1].Value -replace '\\/', '/'
+# Which eportal base answers depends on the AC/VLAN, so try several and report
+# what each one said. Referer matches what the a79 page would send.
+$bases = @(
+    "http://${phost}:$EpPort/eportal/portal",
+    "https://${phost}:$EpHttpsPort/eportal/portal",
+    "http://${phost}/eportal/portal",
+    "http://rz.hstc.edu.cn:$EpPort/eportal/portal",
+    "https://rz.hstc.edu.cn:$EpHttpsPort/eportal/portal"
+)
+$authz = ''; $create = ''
+foreach ($base in $bases) {
+    Get-PageIndices $base $wip
+    RunCurl -Extra @('-G', "$base/cas/create",
+        '--data-urlencode', 'callback=cb',
+        '--data-urlencode', "program_index=$($script:PageProgram)",
+        '--data-urlencode', "page_index=$($script:PageIndex)",
+        '--data-urlencode', "v=$((Get-Random -Minimum 500 -Maximum 10500))",
+        '--data-urlencode', 'lang=zh-cn',
+        '--data-urlencode', 'login_method=1',
+        '--data-urlencode', "wlan_user_ip=$wip",
+        '--data-urlencode', "wlan_user_mac=$umac",
+        '--data-urlencode', "wlan_ac_ip=$acip",
+        '--data-urlencode', "wlan_ac_name=$acname",
+        '--data-urlencode', 'mac_type=0',
+        '--data-urlencode', 'jsVersion=4.1') -Label 'cas/create' -Referer $redir
+    $create = BodyText
+    $st     = Status
+    Say ("cas/create @ {0} -> HTTP {1}, {2} chars, indices={3}/{4}" -f $base, $st, $create.Length, $(if ($script:PageProgram) { $script:PageProgram } else { 'none' }), $(if ($script:PageIndex) { $script:PageIndex } else { 'none' }))
+    if ($script:CurErr) { Say ("  curl: " + $script:CurErr) }
+    if ($create) {
+        if ($create.Length -gt 220) { Say ("  body: " + $create.Substring(0, 220)) } else { Say ("  body: " + $create) }
+    }
+    $m = [regex]::Match($create, '"authorize_uri":"([^"]*)"')
+    if ($m.Success) { $authz = $m.Groups[1].Value -replace '\\/', '/'; break }
+}
+if (-not $authz) { Die 'cas/create failed on every endpoint' }
 Say "authorize_uri: $authz"
 
 # ---------------------------------------------------------------- 3. execution token
@@ -409,12 +435,13 @@ for ($hop = 0; $hop -lt 10; $hop++) {
             '--data-urlencode', 'mfaState=',
             '--data-urlencode', 'currentMenu=1',
             '--data-urlencode', 'failN=-1',
-            $uri) -Label 'cas post'
+            $uri) -Label 'cas post' -Referer $redir
     } else {
         RunCurl -Extra @('-c', $Jar, '-b', $Jar, $uri) -Label 'redirect'
     }
 
     $code = Status
+    if ($script:CurErr) { Say ("  curl: " + $script:CurErr) }
     if ($code -ge 300 -and $code -lt 400) {
         $loc = HdrVal 'Location'
         if ($loc -match 'ticket=ST-') { $sawTicket = $true }
